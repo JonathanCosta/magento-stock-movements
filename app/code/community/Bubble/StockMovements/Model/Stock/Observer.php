@@ -35,13 +35,17 @@ class Bubble_StockMovements_Model_Stock_Observer
         $qty = $item->getQtyOrdered() - max($item->getQtyShipped(), $item->getQtyInvoiced()) - $item->getQtyCanceled();
 
         if ($item->getId() && ($productId = $item->getProductId()) && empty($children) && $qty) {
+            Mage::register('bubble_stockmovements_order_cancellation_in_progress', $productId);
+
             Mage::getSingleton('cataloginventory/stock')->backItemQty($productId, $qty);
-            $stockItem = Mage::getModel('cataloginventory/stock_item')->loadByProduct($item->getProductId());
+            $stockItem = Mage::getModel('cataloginventory/stock_item')->loadByProduct($productId);
             $this->insertStockMovement(
                 $stockItem,
                 sprintf('Product restocked after order cancellation (order: %s)',$item->getOrder()->getIncrementId()),
                 $stockItem->getQty() - $qty
             );
+
+            Mage::unregister('bubble_stockmovements_order_cancellation_in_progress');
         }
 
         return $this;
@@ -124,9 +128,12 @@ class Bubble_StockMovements_Model_Stock_Observer
 
         if (!empty($stockItems)) {
             foreach ($stockItems as $data) {
+                // remove duplicate order increment ids
+                $orders = array_unique($data['orders']);
+
                 $this->insertStockMovement(
                     $data['item'],
-                    sprintf('Product ordered (order%s: %s)',count($data['orders']) > 1 ? 's' : '', implode(', ', $data['orders'])),
+                    sprintf('Product ordered (order%s: %s)',count($orders) > 1 ? 's' : '', implode(', ', $orders)),
                     $data['orig_qty']
                 );
             }
@@ -143,8 +150,8 @@ class Bubble_StockMovements_Model_Stock_Observer
     public function insertStockMovement($stockItem, $message = '', $origQty = null)
     {
         if ($stockItem->getId()) {
-
-            $origQty = $origQty !== null ? $origQty : $stockItem->getOriginalInventoryQty();
+            $_origQty = $stockItem->getOriginalInventoryQty() !== null ? $stockItem->getOriginalInventoryQty() : $stockItem->getOrigData('qty');
+            $origQty = $origQty !== null ? $origQty : $_origQty;
 
             // Do not create entry if the quantity hasn't changed
             if ($origQty == $stockItem->getQty()) return;
@@ -155,7 +162,7 @@ class Bubble_StockMovements_Model_Stock_Observer
                 ->setUserId($this->_getUserId())
                 ->setIsAdmin((int) Mage::getSingleton('admin/session')->isLoggedIn())
                 ->setQty($stockItem->getQty())
-                ->setOriginalQty($origQty !== null ? $origQty : $stockItem->getOriginalInventoryQty())
+                ->setOriginalQty($origQty !== null ? $origQty : $_origQty)
                 ->setIsInStock((int) $stockItem->getIsInStock())
                 ->setMessage($message)
                 ->save();
@@ -165,7 +172,20 @@ class Bubble_StockMovements_Model_Stock_Observer
     public function saveStockItemAfter($observer)
     {
         $stockItem = $observer->getEvent()->getItem();
-        if (!$stockItem->getStockStatusChangedAutomaticallyFlag() || ($stockItem->getOriginalInventoryQty() !== null && ($stockItem->getOriginalInventoryQty() != $stockItem->getQty()))) {
+        $_origQty = $stockItem->getOriginalInventoryQty() !== null ? $stockItem->getOriginalInventoryQty() : $stockItem->getOrigData('qty');
+
+        if (
+            (Mage::registry('bubble_stockmovements_order_cancellation_in_progress') == $stockItem->getProductId()) ||
+
+            // For some strange reason, when a bundle is checked out, the stock item's Orig. Qty is detected as 0.
+            // Online customers are unable to increase a stock item's Qty (i.e. movement > 0),
+            // so we'll prevent stock movement logging when this situation is detected
+            (!Mage::getSingleton('admin/session')->isLoggedIn() && ($stockItem->getQty() > $_origQty))
+        ) {
+            return;
+        }
+
+        if (!$stockItem->getStockStatusChangedAutomaticallyFlag() || ($_origQty !== null && ($_origQty != $stockItem->getQty()))) {
             if (!$message = $stockItem->getSaveMovementMessage()) {
                 if (Mage::getSingleton('api/session')->getSessionId()) {
                     $message = 'Stock saved from Magento API';
