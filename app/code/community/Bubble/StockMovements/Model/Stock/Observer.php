@@ -21,6 +21,12 @@ class Bubble_StockMovements_Model_Stock_Observer
         }
     }
 
+    /**
+     * This method overrides the core listener (core listener disabled in this module's config.xml).
+     *
+     * @param $observer
+     * @return $this
+     */
     public function cancelOrderItem($observer)
     {
         $item = $observer->getEvent()->getItem();
@@ -31,9 +37,10 @@ class Bubble_StockMovements_Model_Stock_Observer
         if ($item->getId() && ($productId = $item->getProductId()) && empty($children) && $qty) {
             Mage::getSingleton('cataloginventory/stock')->backItemQty($productId, $qty);
             $stockItem = Mage::getModel('cataloginventory/stock_item')->loadByProduct($item->getProductId());
-            $this->insertStockMovement($stockItem, sprintf(
-                'Product restocked after order cancellation (order: %s)',
-                $item->getOrder()->getIncrementId())
+            $this->insertStockMovement(
+                $stockItem,
+                sprintf('Product restocked after order cancellation (order: %s)',$item->getOrder()->getIncrementId()),
+                $stockItem->getQty() - $qty
             );
         }
 
@@ -105,6 +112,7 @@ class Bubble_StockMovements_Model_Stock_Observer
                             $stockItems[$stockItem->getId()] = array(
                                 'item' => $stockItem,
                                 'orders' => array($order->getIncrementId()),
+                                'orig_qty' => $stockItem->getQty() + $orderItem->getQtyOrdered()
                             );
                         } else {
                             $stockItems[$stockItem->getId()]['orders'][] = $order->getIncrementId();
@@ -116,35 +124,48 @@ class Bubble_StockMovements_Model_Stock_Observer
 
         if (!empty($stockItems)) {
             foreach ($stockItems as $data) {
-                $this->insertStockMovement($data['item'], sprintf(
-                    'Product ordered (order%s: %s)',
-                    count($data['orders']) > 1 ? 's' : '',
-                    implode(', ', $data['orders'])
-                ));
+                $this->insertStockMovement(
+                    $data['item'],
+                    sprintf('Product ordered (order%s: %s)',count($data['orders']) > 1 ? 's' : '', implode(', ', $data['orders'])),
+                    $data['orig_qty']
+                );
             }
         }
     }
 
-    public function insertStockMovement(Mage_CatalogInventory_Model_Stock_Item $stockItem, $message = '')
+    /**
+     * Creates a new StockMovement object and commits to database.
+     *
+     * @param Mage_CatalogInventory_Model_Stock_Item $stockItem
+     * @param string $message
+     * @param null $origQty
+     */
+    public function insertStockMovement($stockItem, $message = '', $origQty = null)
     {
         if ($stockItem->getId()) {
+
+            $origQty = $origQty !== null ? $origQty : $stockItem->getOriginalInventoryQty();
+
+            // Do not create entry if the quantity hasn't changed
+            if ($origQty == $stockItem->getQty()) return;
+
             Mage::getModel('bubble_stockmovements/stock_movement')
                 ->setItemId($stockItem->getId())
                 ->setUser($this->_getUsername())
                 ->setUserId($this->_getUserId())
                 ->setIsAdmin((int) Mage::getSingleton('admin/session')->isLoggedIn())
                 ->setQty($stockItem->getQty())
+                ->setOriginalQty($origQty !== null ? $origQty : $stockItem->getOriginalInventoryQty())
                 ->setIsInStock((int) $stockItem->getIsInStock())
                 ->setMessage($message)
                 ->save();
-            Mage::getModel('catalog/product')->load($stockItem->getProductId())->cleanCache();
         }
     }
 
     public function saveStockItemAfter($observer)
     {
         $stockItem = $observer->getEvent()->getItem();
-        if (!$stockItem->getStockStatusChangedAutomaticallyFlag() || $stockItem->getOriginalInventoryQty() != $stockItem->getQty()) {
+        if (!$stockItem->getStockStatusChangedAutomaticallyFlag() || ($stockItem->getOriginalInventoryQty() !== null && ($stockItem->getOriginalInventoryQty() != $stockItem->getQty()))) {
             if (!$message = $stockItem->getSaveMovementMessage()) {
                 if (Mage::getSingleton('api/session')->getSessionId()) {
                     $message = 'Stock saved from Magento API';
@@ -160,6 +181,9 @@ class Bubble_StockMovements_Model_Stock_Observer
     {
         $items = $observer->getEvent()->getItems();
         foreach ($items as $productId => $item) {
+            $product = Mage::getModel('catalog/product')->load($productId);
+            if ($product->getTypeId() != "simple") continue;
+
             $stockItem = Mage::getModel('cataloginventory/stock_item')->loadByProduct($productId);
             if ($stockItem->getId()) {
                 $message = 'Product restocked';
@@ -169,7 +193,13 @@ class Bubble_StockMovements_Model_Stock_Observer
                         $creditMemo->getIncrementId()
                     );
                 }
-                $this->insertStockMovement($stockItem, $message);
+
+                // If there is a quote, and its inventory has already been processed, ignore this action
+                if (Mage::getSingleton('checkout/session')->getQuote() &&
+                    Mage::getSingleton('checkout/session')->getQuote()->getInventoryProcessed()) {
+                    return;
+                }
+                $this->insertStockMovement($stockItem, $message, $stockItem->getQty() - $item['qty']);
             }
         }
     }

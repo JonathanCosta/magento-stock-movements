@@ -1,0 +1,25 @@
+{
+  "name": "Ffuenf/Ffuenf_StockMovements",
+  "license": "MIT",
+  "description":"Magento extension to save products stock movements.",
+  "authors":[
+    {
+      "name":"Johann Reinke",
+      "email":"johann.reinke@gmail.com"
+    },
+    {
+      "name":"Achim Rosenhagen",
+      "email":"a.rosenhagen@ffuenf.de"
+    }
+  ],
+  "type": "magento-module",
+  "require-dev": {
+    "aoepeople/composer-installers": "*"
+  },
+  "repositories": [
+    {
+      "type": "composer",
+      "url": "http://packages.firegento.com"
+    }
+  ]
+}
